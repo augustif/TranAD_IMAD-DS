@@ -1,3 +1,5 @@
 requests
 py7zr
 tqdm
+h5py
+fastparquet

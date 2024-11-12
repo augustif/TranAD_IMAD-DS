@@ -2,7 +2,9 @@ from src.parser import *
 from src.folderconstants import *
 
 # Threshold parameters
-lm_d = {
+lm_d = {        
+    	'IMAD-DS_BrushlessMotor': [(0.999, 1), (0.999, 1)],
+    	'IMAD-DS_RoboticArm': [(0.999, 1), (0.999, 1)],
 		'SMD': [(0.99995, 1.04), (0.99995, 1.06)],
 		'synthetic': [(0.999, 1), (0.999, 1)],
 		'SWaT': [(0.993, 1), (0.993, 1)],
@@ -18,6 +20,8 @@ lm = lm_d[args.dataset][1 if 'TranAD' in args.model else 0]
 
 # Hyperparameters
 lr_d = {
+		'IMAD-DS_BrushlessMotor':0.0001,
+		'IMAD-DS_RoboticArm':0.0001,
 		'SMD': 0.0001, 
 		'synthetic': 0.0001, 
 		'SWaT': 0.008, 
@@ -33,6 +37,8 @@ lr = lr_d[args.dataset]
 
 # Debugging
 percentiles = {
+    	'IMAD-DS_BrushlessMotor': (95, 10),
+    	'IMAD-DS_RoboticArm': (95, 10),
 		'SMD': (98, 2000),
 		'synthetic': (95, 10),
 		'SWaT': (95, 10),
