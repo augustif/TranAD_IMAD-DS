@@ -25,28 +25,25 @@ def preprocess_IMAD_DS(machine):
     # constants
     # Duration of initial data time affected by the gyroscope warm-up period
     GYROSCOPE_WARM_UP_TIME = pd.to_timedelta('35ms')
-    WINDOW_SIZE_TS = pd.to_timedelta('100ms')
 
     # Initialize utility dictionary for preprocessing operations
     sensor_dict = {
         'imp23absu_mic': {
-            'fs': 16000,
+            'sampling_frequency': 16000,
             'number_of_channel': 1
         },
         'ism330dhcx_acc': {
-            'fs': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
+            'sampling_frequency': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
             'number_of_channel': 3
         },
         'ism330dhcx_gyro': {
-            'fs': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
+            'sampling_frequency': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
             'number_of_channel': 3
         }
     }
 
     for sensor in sensor_dict.keys():
         sensor = sensor_dict[sensor]
-        sensor['window_length'] = int(
-            sensor['fs'] * WINDOW_SIZE_TS.total_seconds())
     
     normal_source_train = pd.read_csv(
         f'{INPUT_FOLDER}/train/attributes_normal_source_train.csv',
@@ -91,31 +88,29 @@ def preprocess_IMAD_DS(machine):
     for split_type, metadata in zip(
             ['train', 'test'], [Train_Metadata, Test_Metadata]):
         # Define the save path for the HDF5 file
-        save_path = '{}/{}_dataset_window_{:.3f}s.h5'.format(
+        h5_file_path = '{}/{}_dataset.h5'.format(
             OUTPUT_FOLDER,
-            split_type,
-            WINDOW_SIZE_TS.total_seconds()
+            split_type
         )
 
-        print(save_path)
+        print(h5_file_path)
 
         # Open the HDF5 file in write mode
-        with h5py.File(save_path, 'w') as h5file:
+        with h5py.File(h5_file_path, 'w') as h5file:
             # ================================================================ INIT
             # Initialize datasets dictionary to store HDF5 datasets
             datasets = {}
 
             # Create datasets for each sensor defined in sensor_dict
             for sensor in sensor_dict.keys():
-                window_length = sensor_dict[sensor]['window_length']
                 number_of_channel = sensor_dict[sensor]['number_of_channel']
 
                 # Create a dataset for each sensor with specified shape and
                 # chunking
                 datasets[sensor] = h5file.create_dataset(
                     sensor,
-                    shape=(0, number_of_channel, window_length),
-                    maxshape=(None, number_of_channel, window_length),
+                    shape=(0, number_of_channel),
+                    maxshape=(None, number_of_channel),
                     chunks=True
                 )
 
@@ -124,7 +119,7 @@ def preprocess_IMAD_DS(machine):
             # dataset containing the index of corresponding segment
             datasets['segment_id'] = h5file.create_dataset(
                 'segment_id',
-                shape=(0, 1),
+                shape=(0, 1), 
                 maxshape=(None, 1),
                 chunks=True,
                 dtype=h5py.string_dtype(encoding='utf-8')
@@ -148,30 +143,30 @@ def preprocess_IMAD_DS(machine):
                 dtype=h5py.string_dtype(encoding='utf-8')
             )
 
-            # dataset containing operational domain shift labels
-            datasets['domain_shift_op'] = h5file.create_dataset(
-                'domain_shift_op',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+            # # dataset containing operational domain shift labels
+            # datasets['domain_shift_op'] = h5file.create_dataset(
+            #     'domain_shift_op',
+            #     shape=(0, 1),
+            #     maxshape=(None, 1),
+            #     chunks=True,
+            #     dtype=h5py.string_dtype(encoding='utf-8')
+            # )
 
-            # dataset containing environmental domain shift labels
-            datasets['domain_shift_env'] = h5file.create_dataset(
-                'domain_shift_env',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+            # # dataset containing environmental domain shift labels
+            # datasets['domain_shift_env'] = h5file.create_dataset(
+            #     'domain_shift_env',
+            #     shape=(0, 1),
+            #     maxshape=(None, 1),
+            #     chunks=True,
+            #     dtype=h5py.string_dtype(encoding='utf-8')
+            # )
 
             # ============================================  DATA SEGMENTATION INTO
             # Every row of the Metadata represent the i-th segment of one specific recording:
             # the same segment is recorded for all sensors, named in the same way and its path
             # is linked in the appropriate column of the dataframe
 
-            # Iterate over all segments in the metadata
+            # Iterate over all segments in the metadata, concatenate them and add a label for each timestamp 
             for file_index in range(len(metadata)):
                 try:
                     print(
@@ -202,7 +197,7 @@ def preprocess_IMAD_DS(machine):
                         GYROSCOPE_WARM_UP_TIME,
                         max(min_ts_list))
                     end_timestamp = min(max_ts_list)
-
+					
                     # Extract labels for the segment
                     segment_id = metadata['segment_id'][file_index]
                     split_label = metadata['split_label'][file_index]
@@ -211,67 +206,82 @@ def preprocess_IMAD_DS(machine):
                     domain_shift_env = metadata['domain_shift_env'][file_index]
 
                     flag = 1
-                    number_of_window = (
-                        end_timestamp - start_timestamp) // WINDOW_SIZE_TS
 
-                    # Iterate over each sensor to process the data into windows
+                    # Iterate over each sensor to interpolate the data (zero-pad, linear interpolation, ...)
+
+                    max_sampling_frequency = max(sensor_dict[sensor]['sampling_frequency'] for sensor in sensor_dict)
                     for sensor in sensor_dict:
                         sensor_df = sensor_dict[sensor]['data_raw']
-                        num_points_per_window = sensor_dict[sensor]['window_length']
+						
                         num_channel = sensor_dict[sensor]['number_of_channel']
 
-                        # Iterate over each window in the segment
-                        for window_idx in range(number_of_window):
-                            start = start_timestamp + window_idx * WINDOW_SIZE_TS
-                            end = start + WINDOW_SIZE_TS
-                            sensor_df_window = sensor_df[start:end].values
+                        # cut timeseries to synchronize sensors in time
+                        sensor_df_cut = sensor_df[start_timestamp:end_timestamp]
 
-                            # Zero-pad or truncate the window to match the expected
-                            # length
-                            l = len(sensor_df_window)
-                            if l < num_points_per_window:
-                                pad_size = num_points_per_window - l
-                                padding = np.zeros((pad_size, num_channel))
-                                sensor_df_window = np.vstack(
-                                    [sensor_df_window, padding])
-                            else:
-                                sensor_df_window = sensor_df_window[:num_points_per_window, :]
+                        # Upsample sensors with lower sampling frequency  
+                        if sensor_dict[sensor]['sampling_frequency'] < max_sampling_frequency:
+                            # Calculate the target time delta from the frequency
+                            target_time_delta = pd.Timedelta(seconds=1 / max_sampling_frequency)
 
-                            # Resize and store the windowed data in the HDF5
-                            # dataset
-                            current_size = datasets[sensor].shape[0]
-                            datasets[sensor].resize(current_size + 1, axis=0)
-                            datasets[sensor][-1] = sensor_df_window.T
+                            # Resample the DataFrame to the target frequency
+                            sensor_df_resampled = sensor_df_cut.resample(target_time_delta, origin=sensor_df_cut.index[0]).interpolate(method='linear')
 
-                            if flag: #compute only during windowing the first sensor, since the labels are equl for every sensor
-                                current_size = datasets['segment_id'].shape[0]
+                            sensor_dict[sensor]['resampled'] = sensor_df_resampled
+                        else:
+                            sensor_dict[sensor]['resampled'] = sensor_df_cut
+							
+                    # check if all resampled have same length and adjust shorter sensors samples
+                    max_length = max([len(sensor_dict[sensor]['resampled']) for sensor in sensor_dict])
+                    for sensor in sensor_dict:
+                        # Calculate the number of padding samples needed
+                        df_resampled = sensor_dict[sensor]['resampled']
+                        padding_length = max_length - len(df_resampled)
+                        if padding_length > 0:
+                            last_time = df_resampled.index[-1]
+                            padding_times = pd.date_range(start=last_time + target_time_delta, periods=padding_length, freq=target_time_delta)
+                            padding_values = np.zeros(padding_length)
+                            padding_df = pd.DataFrame({col: padding_values for col in df_resampled.columns}, index=padding_times)
 
-                                datasets['segment_id'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['segment_id'][-1] = segment_id
+                            # Append the zero padding samples to the original DataFrame
+                            df_padded = pd.concat([df_resampled,padding_df])
+                        else:
+                            df_padded = df_resampled
+                         
+                        # Resize and store the resampled data in the HDF5
+                        # dataset
+                        current_size = datasets[sensor].shape[0]
+                        datasets[sensor].resize(current_size + len(df_padded), axis=0)
+                        datasets[sensor][-len(df_padded):] = df_padded
 
-                                datasets['split_label'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['split_label'][-1] = split_label
+                        if flag: #compute only during windowing the first sensor, since the labels are equl for every sensor
+                            current_size = datasets['segment_id'].shape[0]
 
-                                datasets['anomaly_label'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['anomaly_label'][-1] = anomaly_label
+                            datasets['segment_id'].resize(
+                                current_size + len(df_padded), axis=0)
+                            datasets['segment_id'][-len(df_padded):] = segment_id
 
-                                datasets['domain_shift_op'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['domain_shift_op'][-1] = domain_shift_op
+                            datasets['split_label'].resize(
+                                current_size + len(df_padded), axis=0)
+                            datasets['split_label'][-len(df_padded):] = split_label
 
-                                datasets['domain_shift_env'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['domain_shift_env'][-1] = domain_shift_env
+                            datasets['anomaly_label'].resize(
+                                current_size + len(df_padded), axis=0)
+                            datasets['anomaly_label'][-len(df_padded):] = anomaly_label
+
+                            datasets['domain_shift_op'].resize(
+                                current_size + len(df_padded), axis=0)
+                            datasets['domain_shift_op'][-len(df_padded):] = domain_shift_op
+
+                            datasets['domain_shift_env'].resize(
+                                current_size + len(df_padded), axis=0)
+                            datasets['domain_shift_env'][-len(df_padded):] = domain_shift_env
 
                         flag = 0
 
                 except Exception as e:
                     print('could not read file index {}'.format(file_index), e)
 
-        with h5py.File(save_path, 'r') as h5file:	
+        with h5py.File(h5_file_path, 'r') as h5file:	
 			# Save the data to a NumPy file
             data = h5file['imp23absu_mic'][:]
             np.save(OUTPUT_FOLDER + os.sep + split_type + '_imp23absu_mic' + '.npy', data)
@@ -284,8 +294,9 @@ def preprocess_IMAD_DS(machine):
 
             if split_type == 'test':
                 data = h5file['anomaly_label'][:]
-                np.save(OUTPUT_FOLDER + os.sep + 'labels_multisensor.npy', data, allow_pickle=True)
-
+                np.save(OUTPUT_FOLDER + os.sep + 'labels.npy', data, allow_pickle=True)
+		
+        os.remove(h5_file_path)
 
 def load_and_save(category, filename, dataset, dataset_folder):
     temp = np.genfromtxt(os.path.join(dataset_folder, category, filename),
