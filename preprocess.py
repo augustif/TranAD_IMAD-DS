@@ -5,295 +5,289 @@ import pandas as pd
 import numpy as np
 import pickle
 import json
+from scipy.interpolate import interp1d
+from sklearn.model_selection import train_test_split
 from src.folderconstants import *
 from shutil import copyfile
 from time import gmtime, strftime
+
+SEED = 6666
 
 datasets = ['synthetic', 'SMD', 'SWaT', 'SMAP', 'MSL', 'WADI', 'MSDS', 'UCR', 'MBA', 'NAB']
 
 wadi_drop = ['2_LS_001_AL', '2_LS_002_AL','2_P_001_STATUS','2_P_002_STATUS']
 
-    #machine can be 'BrushlessMotor', 'RoboticArm'
-def preprocess_IMAD_DS(machine):
+	#machine can be 'BrushlessMotor', 'RoboticArm'
+def preprocess_IMAD_DS(machine, sensor_dict):
 
-    # Initializations
-    INPUT_FOLDER = f'data/IMAD-DS/{machine}'
-    OUTPUT_FOLDER = f'processed/IMAD-DS_{machine}'
+	# Initializations
+	INPUT_FOLDER = f'data/IMAD-DS/{machine}'
+	OUTPUT_FOLDER = f'processed/IMAD-DS_{machine}'
 
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+	os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-    # constants
-    # Duration of initial data time affected by the gyroscope warm-up period
-    GYROSCOPE_WARM_UP_TIME = pd.to_timedelta('35ms')
-    WINDOW_SIZE_TS = pd.to_timedelta('100ms')
+	# constants
+	# Duration of initial data time affected by the gyroscope warm-up period
+	GYROSCOPE_WARM_UP_TIME = pd.to_timedelta('35ms')
+	WINDOW_SIZE_TS = pd.to_timedelta('100ms')
 
-    # Initialize utility dictionary for preprocessing operations
-    sensor_dict = {
-        'imp23absu_mic': {
-            'fs': 16000,
-            'number_of_channel': 1
-        },
-        'ism330dhcx_acc': {
-            'fs': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
-            'number_of_channel': 3
-        },
-        'ism330dhcx_gyro': {
-            'fs': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
-            'number_of_channel': 3
-        }
-    }
+	for sensor in sensor_dict.keys():
+		sensor = sensor_dict[sensor]
+		sensor['window_length'] = int(
+			sensor['fs'] * WINDOW_SIZE_TS.total_seconds())
+	
+	normal_source_train = pd.read_csv(
+		f'{INPUT_FOLDER}/train/attributes_normal_source_train.csv',
+		index_col=0)
+	normal_target_train = pd.read_csv(
+		f'{INPUT_FOLDER}/train/attributes_normal_target_train.csv',
+		index_col=0)
+	normal_source_test = pd.read_csv(
+		f'{INPUT_FOLDER}/test/attributes_normal_source_test.csv',
+		index_col=0)
+	anomaly_source_test = pd.read_csv(
+		f'{INPUT_FOLDER}/test/attributes_anomaly_source_test.csv',
+		index_col=0)
+	normal_target_test = pd.read_csv(
+		f'{INPUT_FOLDER}/test/attributes_normal_target_test.csv',
+		index_col=0)
+	anomaly_target_test = pd.read_csv(
+		f'{INPUT_FOLDER}/test/attributes_anomaly_target_test.csv',
+		index_col=0)
 
-    for sensor in sensor_dict.keys():
-        sensor = sensor_dict[sensor]
-        sensor['window_length'] = int(
-            sensor['fs'] * WINDOW_SIZE_TS.total_seconds())
-    
-    normal_source_train = pd.read_csv(
-        f'{INPUT_FOLDER}/train/attributes_normal_source_train.csv',
-        index_col=0)
-    normal_target_train = pd.read_csv(
-        f'{INPUT_FOLDER}/train/attributes_normal_target_train.csv',
-        index_col=0)
-    normal_source_test = pd.read_csv(
-        f'{INPUT_FOLDER}/test/attributes_normal_source_test.csv',
-        index_col=0)
-    anomaly_source_test = pd.read_csv(
-        f'{INPUT_FOLDER}/test/attributes_anomaly_source_test.csv',
-        index_col=0)
-    normal_target_test = pd.read_csv(
-        f'{INPUT_FOLDER}/test/attributes_normal_target_test.csv',
-        index_col=0)
-    anomaly_target_test = pd.read_csv(
-        f'{INPUT_FOLDER}/test/attributes_anomaly_target_test.csv',
-        index_col=0)
+	Train_Metadata = pd.concat(
+		[normal_source_train, normal_target_train], axis=0).reset_index(drop=True)
+	Test_Metadata = pd.concat([normal_source_test,
+							anomaly_source_test,
+							normal_target_test,
+							anomaly_target_test],
+							axis=0).reset_index(drop=True)
 
-    Train_Metadata = pd.concat(
-        [normal_source_train, normal_target_train], axis=0).reset_index(drop=True)
-    Test_Metadata = pd.concat([normal_source_test,
-                            anomaly_source_test,
-                            normal_target_test,
-                            anomaly_target_test],
-                            axis=0).reset_index(drop=True)
+	# create segment id column
+	Train_Metadata['segment_id'] = Train_Metadata['imp23absu_mic'].apply(
+		lambda x: x.replace('imp23absu_mic_', ''))
+	Test_Metadata['segment_id'] = Test_Metadata['imp23absu_mic'].apply(
+		lambda x: x.replace('imp23absu_mic_', ''))
 
-    # create segment id column
-    Train_Metadata['segment_id'] = Train_Metadata['imp23absu_mic'].apply(
-        lambda x: x.replace('imp23absu_mic_', ''))
-    Test_Metadata['segment_id'] = Test_Metadata['imp23absu_mic'].apply(
-        lambda x: x.replace('imp23absu_mic_', ''))
+	# add customized path to each filepath in the Metadata dataframes
+	for sensor in sensor_dict.keys():
+		Train_Metadata[sensor] = INPUT_FOLDER + '/train/' + Train_Metadata[sensor]
+		Test_Metadata[sensor] = INPUT_FOLDER + '/test/' + Test_Metadata[sensor]
 
-    # add customized path to each filepath in the Metadata dataframes
-    for sensor in sensor_dict.keys():
-        Train_Metadata[sensor] = INPUT_FOLDER + '/train/' + Train_Metadata[sensor]
-        Test_Metadata[sensor] = INPUT_FOLDER + '/test/' + Test_Metadata[sensor]
+	# Loop through each dataset split type ('train' and 'test') with
+	# corresponding metadata
+	for split_type, metadata in zip(
+			['train', 'test'], [Train_Metadata, Test_Metadata]):
+		# Define the save path for the HDF5 file
+		h5file_path = '{}/{}_dataset_window_{:.3f}s.h5'.format(
+			OUTPUT_FOLDER,
+			split_type,
+			WINDOW_SIZE_TS.total_seconds()
+		)
 
-    # Loop through each dataset split type ('train' and 'test') with
-    # corresponding metadata
-    for split_type, metadata in zip(
-            ['train', 'test'], [Train_Metadata, Test_Metadata]):
-        # Define the save path for the HDF5 file
-        save_path = '{}/{}_dataset_window_{:.3f}s.h5'.format(
-            OUTPUT_FOLDER,
-            split_type,
-            WINDOW_SIZE_TS.total_seconds()
-        )
+		print(h5file_path)
 
-        print(save_path)
+		if os.path.exists(h5file_path):
+			print(f"File exists: {h5file_path}. Aborted creation")
+			return
+		else:
+			print(f"Creation of file {h5file_path}")
+			
+		# Open the HDF5 file in write mode
+		with h5py.File(h5file_path, 'w') as h5file:
+			# ================================================================ INIT
+			# Initialize datasets dictionary to store HDF5 datasets
+			datasets = {}
 
-        # Open the HDF5 file in write mode
-        with h5py.File(save_path, 'w') as h5file:
-            # ================================================================ INIT
-            # Initialize datasets dictionary to store HDF5 datasets
-            datasets = {}
+			# Create datasets for each sensor defined in sensor_dict
+			for sensor in sensor_dict.keys():
+				window_length = sensor_dict[sensor]['window_length']
+				number_of_channel = sensor_dict[sensor]['number_of_channel']
 
-            # Create datasets for each sensor defined in sensor_dict
-            for sensor in sensor_dict.keys():
-                window_length = sensor_dict[sensor]['window_length']
-                number_of_channel = sensor_dict[sensor]['number_of_channel']
+				# Create a dataset for each sensor with specified shape and
+				# chunking
+				datasets[sensor] = h5file.create_dataset(
+					sensor,
+					shape=(0, number_of_channel, window_length),
+					maxshape=(None, number_of_channel, window_length),
+					chunks=True
+				)
 
-                # Create a dataset for each sensor with specified shape and
-                # chunking
-                datasets[sensor] = h5file.create_dataset(
-                    sensor,
-                    shape=(0, number_of_channel, window_length),
-                    maxshape=(None, number_of_channel, window_length),
-                    chunks=True
-                )
+			# Create additional datasets for segment ID and various labels
 
-            # Create additional datasets for segment ID and various labels
+			# dataset containing the index of corresponding segment
+			datasets['segment_id'] = h5file.create_dataset(
+				'segment_id',
+				shape=(0, 1),
+				maxshape=(None, 1),
+				chunks=True,
+				dtype=h5py.string_dtype(encoding='utf-8')
+			)
 
-            # dataset containing the index of corresponding segment
-            datasets['segment_id'] = h5file.create_dataset(
-                'segment_id',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+			# dataset containing split labels
+			datasets['split_label'] = h5file.create_dataset(
+				'split_label',
+				shape=(0, 1),
+				maxshape=(None, 1),
+				chunks=True,
+				dtype=h5py.string_dtype(encoding='utf-8')
+			)
 
-            # dataset containing split labels
-            datasets['split_label'] = h5file.create_dataset(
-                'split_label',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+			# dataset containing anomaly labels
+			datasets['anomaly_label'] = h5file.create_dataset(
+				'anomaly_label',
+				shape=(0, 1),
+				maxshape=(None, 1),
+				chunks=True,
+				dtype=h5py.string_dtype(encoding='utf-8')
+			)
 
-            # dataset containing anomaly labels
-            datasets['anomaly_label'] = h5file.create_dataset(
-                'anomaly_label',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+			# dataset containing operational domain shift labels
+			datasets['domain_shift_op'] = h5file.create_dataset(
+				'domain_shift_op',
+				shape=(0, 1),
+				maxshape=(None, 1),
+				chunks=True,
+				dtype=h5py.string_dtype(encoding='utf-8')
+			)
 
-            # dataset containing operational domain shift labels
-            datasets['domain_shift_op'] = h5file.create_dataset(
-                'domain_shift_op',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+			# dataset containing environmental domain shift labels
+			datasets['domain_shift_env'] = h5file.create_dataset(
+				'domain_shift_env',
+				shape=(0, 1),
+				maxshape=(None, 1),
+				chunks=True,
+				dtype=h5py.string_dtype(encoding='utf-8')
+			)
 
-            # dataset containing environmental domain shift labels
-            datasets['domain_shift_env'] = h5file.create_dataset(
-                'domain_shift_env',
-                shape=(0, 1),
-                maxshape=(None, 1),
-                chunks=True,
-                dtype=h5py.string_dtype(encoding='utf-8')
-            )
+			# ============================================  DATA SEGMENTATION INTO
+			# Every row of the Metadata represent the i-th segment of one specific recording:
+			# the same segment is recorded for all sensors, named in the same way and its path
+			# is linked in the appropriate column of the dataframe
 
-            # ============================================  DATA SEGMENTATION INTO
-            # Every row of the Metadata represent the i-th segment of one specific recording:
-            # the same segment is recorded for all sensors, named in the same way and its path
-            # is linked in the appropriate column of the dataframe
+			# Iterate over all segments in the metadata
+			for file_index in range(len(metadata)):
+				try:
+					print(
+						f'Completed: {file_index / (len(metadata)-1)*100:.2f}%',
+						end='\r')
 
-            # Iterate over all segments in the metadata
-            for file_index in range(len(metadata)):
-                try:
-                    print(
-                        f'Completed: {file_index / (len(metadata)-1)*100:.2f}%',
-                        end='\r')
+					# Load and process data for each sensor
+					for sensor in sensor_dict:
+						sensor_df = pd.read_parquet(metadata[sensor][file_index])
+						sensor_df['Time'] = pd.to_datetime(
+							sensor_df['Time'], unit='s')
+						sensor_df.set_index('Time', inplace=True)
+						sensor_df.sort_index(inplace=True)
 
-                    # Load and process data for each sensor
-                    for sensor in sensor_dict:
-                        sensor_df = pd.read_parquet(metadata[sensor][file_index])
-                        sensor_df['Time'] = pd.to_datetime(
-                            sensor_df['Time'], unit='s')
-                        sensor_df.set_index('Time', inplace=True)
-                        sensor_df.sort_index(inplace=True)
+						sensor_dict[sensor]['data_raw'] = sensor_df
+						sensor_dict[sensor]['max_ts'] = sensor_df.index[-1]
+						sensor_dict[sensor]['min_ts'] = sensor_df.index[0]
 
-                        sensor_dict[sensor]['data_raw'] = sensor_df
-                        sensor_dict[sensor]['max_ts'] = sensor_df.index[-1]
-                        sensor_dict[sensor]['min_ts'] = sensor_df.index[0]
+					# Determine the time range for the segment: makes sure that
+					# there is available data for all sensors
+					max_ts_list = [sensor_dict[sensor]['max_ts']
+								for sensor in sensor_dict]
+					min_ts_list = [sensor_dict[sensor]['min_ts']
+								for sensor in sensor_dict]
 
-                    # Determine the time range for the segment: makes sure that
-                    # there is available data for all sensors
-                    max_ts_list = [sensor_dict[sensor]['max_ts']
-                                for sensor in sensor_dict]
-                    min_ts_list = [sensor_dict[sensor]['min_ts']
-                                for sensor in sensor_dict]
+					start_timestamp = max(
+						sensor_dict['ism330dhcx_gyro']['min_ts'] +
+						GYROSCOPE_WARM_UP_TIME,
+						max(min_ts_list))
+					end_timestamp = min(max_ts_list)
 
-                    start_timestamp = max(
-                        sensor_dict['ism330dhcx_gyro']['min_ts'] +
-                        GYROSCOPE_WARM_UP_TIME,
-                        max(min_ts_list))
-                    end_timestamp = min(max_ts_list)
+					# Extract labels for the segment
+					segment_id = metadata['segment_id'][file_index]
+					split_label = metadata['split_label'][file_index]
+					anomaly_label = metadata['anomaly_label'][file_index]
+					domain_shift_op = metadata['domain_shift_op'][file_index]
+					domain_shift_env = metadata['domain_shift_env'][file_index]
 
-                    # Extract labels for the segment
-                    segment_id = metadata['segment_id'][file_index]
-                    split_label = metadata['split_label'][file_index]
-                    anomaly_label = metadata['anomaly_label'][file_index]
-                    domain_shift_op = metadata['domain_shift_op'][file_index]
-                    domain_shift_env = metadata['domain_shift_env'][file_index]
+					flag = 1
+					number_of_window = (
+						end_timestamp - start_timestamp) // WINDOW_SIZE_TS
 
-                    flag = 1
-                    number_of_window = (
-                        end_timestamp - start_timestamp) // WINDOW_SIZE_TS
+					# Iterate over each sensor to process the data into windows
+					for sensor in sensor_dict:
+						sensor_df = sensor_dict[sensor]['data_raw']
+						num_points_per_window = sensor_dict[sensor]['window_length']
+						num_channel = sensor_dict[sensor]['number_of_channel']
 
-                    # Iterate over each sensor to process the data into windows
-                    for sensor in sensor_dict:
-                        sensor_df = sensor_dict[sensor]['data_raw']
-                        num_points_per_window = sensor_dict[sensor]['window_length']
-                        num_channel = sensor_dict[sensor]['number_of_channel']
+						# Iterate over each window in the segment
+						for window_idx in range(number_of_window):
+							start = start_timestamp + window_idx * WINDOW_SIZE_TS
+							end = start + WINDOW_SIZE_TS if start + WINDOW_SIZE_TS < end_timestamp else end_timestamp
+							sensor_df_window = sensor_df[start:end].values
 
-                        # Iterate over each window in the segment
-                        for window_idx in range(number_of_window):
-                            start = start_timestamp + window_idx * WINDOW_SIZE_TS
-                            end = start + WINDOW_SIZE_TS
-                            sensor_df_window = sensor_df[start:end].values
+							# Zero-pad or truncate the window to match the expected
+							# length
+							l = len(sensor_df_window)
+							if l < num_points_per_window:
+								pad_size = num_points_per_window - l
+								padding = np.zeros((pad_size, num_channel))
+								sensor_df_window = np.vstack(
+									[sensor_df_window, padding])
+							else:
+								sensor_df_window = sensor_df_window[:num_points_per_window, :]
 
-                            # Zero-pad or truncate the window to match the expected
-                            # length
-                            l = len(sensor_df_window)
-                            if l < num_points_per_window:
-                                pad_size = num_points_per_window - l
-                                padding = np.zeros((pad_size, num_channel))
-                                sensor_df_window = np.vstack(
-                                    [sensor_df_window, padding])
-                            else:
-                                sensor_df_window = sensor_df_window[:num_points_per_window, :]
+							# Resize and store the windowed data in the HDF5
+							# dataset
+							current_size = datasets[sensor].shape[0]
+							datasets[sensor].resize(current_size + 1, axis=0)
+							datasets[sensor][-1] = sensor_df_window.T
 
-                            # Resize and store the windowed data in the HDF5
-                            # dataset
-                            current_size = datasets[sensor].shape[0]
-                            datasets[sensor].resize(current_size + 1, axis=0)
-                            datasets[sensor][-1] = sensor_df_window.T
+							if flag: #compute only during windowing the first sensor, since the labels are equl for every sensor
+								current_size = datasets['segment_id'].shape[0]
 
-                            if flag: #compute only during windowing the first sensor, since the labels are equl for every sensor
-                                current_size = datasets['segment_id'].shape[0]
+								datasets['segment_id'].resize(
+									current_size + 1, axis=0)
+								datasets['segment_id'][-1] = segment_id
 
-                                datasets['segment_id'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['segment_id'][-1] = segment_id
+								datasets['split_label'].resize(
+									current_size + 1, axis=0)
+								datasets['split_label'][-1] = split_label
 
-                                datasets['split_label'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['split_label'][-1] = split_label
+								datasets['anomaly_label'].resize(
+									current_size + 1, axis=0)
+								datasets['anomaly_label'][-1] = anomaly_label
 
-                                datasets['anomaly_label'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['anomaly_label'][-1] = anomaly_label
+								datasets['domain_shift_op'].resize(
+									current_size + 1, axis=0)
+								datasets['domain_shift_op'][-1] = domain_shift_op
 
-                                datasets['domain_shift_op'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['domain_shift_op'][-1] = domain_shift_op
+								datasets['domain_shift_env'].resize(
+									current_size + 1, axis=0)
+								datasets['domain_shift_env'][-1] = domain_shift_env
 
-                                datasets['domain_shift_env'].resize(
-                                    current_size + 1, axis=0)
-                                datasets['domain_shift_env'][-1] = domain_shift_env
+						flag = 0
 
-                        flag = 0
+				except Exception as e:
+					print('could not read file index {}'.format(file_index), e)
 
-                except Exception as e:
-                    print('could not read file index {}'.format(file_index), e)
+		# with h5py.File(h5file_path, 'r') as h5file:	
+		# 	# Save the data to a NumPy file
+		# 	data = h5file['imp23absu_mic'][:]
+		# 	np.save(OUTPUT_FOLDER + os.sep + split_type + '_imp23absu_mic' + '.npy', data)
 
-        with h5py.File(save_path, 'r') as h5file:	
-			# Save the data to a NumPy file
-            data = h5file['imp23absu_mic'][:]
-            np.save(OUTPUT_FOLDER + os.sep + split_type + '_imp23absu_mic' + '.npy', data)
+		# 	data = h5file['ism330dhcx_acc'][:]
+		# 	np.save(OUTPUT_FOLDER + os.sep + split_type + '_ism330dhcx_acc' + '.npy', data)
 
-            data = h5file['ism330dhcx_acc'][:]
-            np.save(OUTPUT_FOLDER + os.sep + split_type + '_ism330dhcx_acc' + '.npy', data)
+		# 	data = h5file['ism330dhcx_gyro'][:]
+		# 	np.save(OUTPUT_FOLDER + os.sep + split_type + '_ism330dhcx_gyro' + '.npy', data)
 
-            data = h5file['ism330dhcx_gyro'][:]
-            np.save(OUTPUT_FOLDER + os.sep + split_type + '_ism330dhcx_gyro' + '.npy', data)
-
-            if split_type == 'test':
-                data = h5file['anomaly_label'][:]
-                np.save(OUTPUT_FOLDER + os.sep + 'labels_multisensor.npy', data, allow_pickle=True)
+		# 	if split_type == 'test':
+		# 		data = h5file['anomaly_label'][:]
+		# 		np.save(OUTPUT_FOLDER + os.sep + 'labels_multisensor.npy', data, allow_pickle=True)
 
 
 def load_and_save(category, filename, dataset, dataset_folder):
-    temp = np.genfromtxt(os.path.join(dataset_folder, category, filename),
-                         dtype=np.float64,
-                         delimiter=',')
-    print(dataset, category, filename, temp.shape)
-    np.save(os.path.join(output_folder, f"SMD/{dataset}_{category}.npy"), temp)
-    return temp.shape
+	temp = np.genfromtxt(os.path.join(dataset_folder, category, filename),
+						 dtype=np.float64,
+						 delimiter=',')
+	print(dataset, category, filename, temp.shape)
+	np.save(os.path.join(output_folder, f"SMD/{dataset}_{category}.npy"), temp)
+	return temp.shape
 
 def load_and_save2(category, filename, dataset, dataset_folder, shape):
 	temp = np.zeros(shape)
@@ -322,6 +316,31 @@ def convertNumpy(df):
 	x = df[df.columns[3:]].values[::10, :]
 	return (x - x.min(0)) / (x.ptp(0) + 1e-4)
 
+def load_windows_dataset_IMADS(path, label_names, sensors):
+	"""
+	Load training and testing datasets from HDF5 files.
+
+	Parameters:
+	train_path (str): Path to the training dataset HDF5 file.
+	test_path (str): Path to the testing dataset HDF5 file.
+	label_names (list): List of label names to extract from the HDF5 files.
+	sensors (dict): dict containing sensors to extract from the HDF5 files. Sensor names must be the dict keys.
+
+	Returns:
+	tuple: A tuple containing the following elements:
+		- X_raw (list): List of numpy arrays containing raw data for each sensor.
+		- y_raw (pd.DataFrame): DataFrame containing labels.
+	"""
+	with h5py.File(path, 'r') as f:
+		# Extract raw training data for each sensor
+		X_raw = [f[sensor][:] for sensor in sensors]
+		# Extract and decode training labels
+		Y_raw = pd.DataFrame([[s.decode(
+			'utf-8') for s in f[label_name][:].flatten()] for label_name in label_names]).T
+		Y_raw.columns = label_names
+		
+	return X_raw, Y_raw
+
 def load_data(dataset):
 	folder = os.path.join(output_folder, dataset)
 	os.makedirs(folder, exist_ok=True)
@@ -345,35 +364,122 @@ def load_data(dataset):
 			
 	elif dataset=='IMAD-DS_RoboticArm' or dataset=='IMAD-DS_BrushlessMotor':
 		
-		machine = dataset.split('_')[1]
-		preprocess_IMAD_DS(machine)
-		
-		dataset_folder = os.path.join('processed', dataset)
-		
-		train_multisensor = []
-		for file in [f for f in os.listdir(dataset_folder) if 'train' in f if'.npy' in f if not 'label' in f]:
-			train = np.load(os.path.join(dataset_folder,file))
-			train, min_a, max_a = normalize3(train.T) # per window normalization
-			train = train.T # transpose again to get original shape (rows= windows)
-			np.save(os.path.join(dataset_folder,file), train)
-			train = train.reshape(train.shape[0], -1) # concatenate simultaneous channels windows 
-			train_multisensor.append(train)
-		
-		train_multisensor = np.concatenate(train_multisensor, axis=1) # concatenate all sensors into a single vector (1 row = all sensors channels concatenated)
-		np.save(os.path.join(dataset_folder,'train_multisensor.npy'), train_multisensor)
-		
-		test_multisensor = []
-		for file in [f for f in os.listdir(dataset_folder) if 'test' in f if'.npy' in f if not 'label' in f]:
-			test = np.load(os.path.join(dataset_folder,file))
-			test, min_a, max_a = normalize3(test.T) # per window normalization
-			test = test.T # transpose again to get original shape (rows= windows)
-			np.save(os.path.join(dataset_folder,file), test)
-			test = test.reshape(test.shape[0], -1) # concatenate simultaneous channels windows 
-			test_multisensor.append(test)
-		
-		test_multisensor = np.concatenate(test_multisensor, axis=1) # concatenate all sensors into a single vector (1 row = all sensors channels concatenated)
-		np.save(os.path.join(dataset_folder,'test_multisensor.npy'), test_multisensor)
+		# Initialize utility dictionary for preprocessing operations
+		sensor_dict = {
+			'imp23absu_mic': {
+				'fs': 16000,
+				'number_of_channel': 1
+			},
+			'ism330dhcx_acc': {
+				'fs': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
+				'number_of_channel': 3
+			},
+			'ism330dhcx_gyro': {
+				'fs': 7063,  # Estimated sampling rate calculated by averaging time deltas across all files
+				'number_of_channel': 3
+			}
+		}
 
+		machine = dataset.split('_')[1]
+		preprocess_IMAD_DS(machine, sensor_dict)
+		
+		# List of label names to be extracted from the dataset
+		label_names = [
+			'segment_id',
+			'split_label',
+			'anomaly_label',
+			'domain_shift_op',
+			'domain_shift_env'
+			]  
+
+
+
+		X, y = load_windows_dataset_IMADS(
+			path ='processed/{}/train_dataset_window_0.100s.h5'.format(
+				dataset
+			),
+			label_names = label_names,
+			sensors= sensor_dict
+			)
+		
+		
+		# Combine anomaly labels and domain shift labels to form a combined label
+		y['combined_label'] = y['anomaly_label'] + \
+			y['domain_shift_op'] + y['domain_shift_env']
+
+		# Split training data into training and validation sets, maintaining the
+		# stratified distribution of the combined label
+		train_indices, valid_indices, _, _ = train_test_split(
+			range(len(y)),
+			y,
+			stratify=y['combined_label'],
+			test_size=0.2,
+			random_state=SEED
+		)
+
+		# Select the training and validation data based on the indices
+		X_train = [sensor_data[train_indices] for sensor_data in X]
+		X_valid = [sensor_data[valid_indices] for sensor_data in X]
+		# y_train = y.iloc[train_indices]['anomaly_label'].reset_index(drop=True)
+		# y_valid = y.iloc[valid_indices]['anomaly_label'].reset_index(drop=True)
+
+		X_test, y_test = load_windows_dataset_IMADS(
+			path ='processed/{}/test_dataset_window_0.100s.h5'.format(
+				dataset
+			),
+			label_names = label_names,
+			sensors= sensor_dict
+			)
+		
+		# Combine anomaly labels and domain shift labels to form a combined label
+		y_test = y_test['anomaly_label'].apply(lambda x: 1 if x != 'normal' else 0).values
+
+		# Reshape and zero-pad each single segment
+		def upsample_array(array, target_length):
+			original_length = array.shape[-1]
+			x_original = np.linspace(0, 1, original_length)
+			x_target = np.linspace(0, 1, target_length)
+			upsampled_array = np.zeros((array.shape[0], array.shape[1], target_length))
+			
+			for i in range(array.shape[0]):
+				for j in range(array.shape[1]):
+					f = interp1d(x_original, array[i, j, :], kind='linear')
+					upsampled_array[i, j, :] = f(x_target)
+			
+			return upsampled_array
+		
+		def upsample_dataset(dataset):
+
+			target_length = max(array.shape[-1] for array in dataset)
+			dataset_res = [upsample_array(array, target_length) for array in dataset]
+			return dataset_res
+	
+		X_train_res = upsample_dataset(X_train)
+		X_valid_res = upsample_dataset(X_valid)
+		X_test_res = upsample_dataset(X_test)
+
+		# concatenate all windows into a single vector
+		X_train_res_c = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_train_res]
+		X_valid_res_c = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_valid_res]
+		X_test_res_c  = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_test_res]
+
+		# merge into a single array with a channel per sensor 
+		X_train = np.concatenate(X_train_res_c, axis = 1)
+		X_valid = np.concatenate(X_valid_res_c, axis = 1)
+		X_test = np.concatenate(X_test_res_c, axis = 1)
+
+		dataset_folder = os.path.join('processed', dataset)
+		np.save(os.path.join(dataset_folder, 'train.npy'), X_train)
+		np.save(os.path.join(dataset_folder, 'valid.npy'), X_valid)
+		np.save(os.path.join(dataset_folder, 'test.npy'),  X_test)
+		
+		# adapt labels (see SMAP processing)
+		y_test = y_test.repeat(X_test_res[0].shape[-1]) #obtain a label for each timestamp
+		y_test = y_test.reshape(-1,1).repeat(X_test.shape[-1], axis=1) # obtain as many label columns as the channels
+		# np.save(os.path.join(dataset_folder, 'labels_train.npy'), y_train)
+		# np.save(os.path.join(dataset_folder, 'labels_valid.npy'), y_valid)
+		np.save(os.path.join(dataset_folder, 'labels.npy'), y_test)
+		
 	elif dataset == 'SMD':
 		dataset_folder = 'data/SMD'
 		file_list = os.listdir(os.path.join(dataset_folder, "train"))
