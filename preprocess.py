@@ -22,7 +22,7 @@ def preprocess_IMAD_DS(machine, sensor_dict):
 
 	# Initializations
 	INPUT_FOLDER = f'data/IMAD-DS/{machine}'
-	OUTPUT_FOLDER = f'processed/IMAD-DS_{machine}'
+	OUTPUT_FOLDER = os.path.join(output_folder, f'IMAD-DS_{machine}')
 
 	os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
@@ -110,7 +110,8 @@ def preprocess_IMAD_DS(machine, sensor_dict):
 					sensor,
 					shape=(0, number_of_channel, window_length),
 					maxshape=(None, number_of_channel, window_length),
-					chunks=True
+					chunks=True,
+					dtype=np.float32
 				)
 
 			# Create additional datasets for segment ID and various labels
@@ -219,6 +220,9 @@ def preprocess_IMAD_DS(machine, sensor_dict):
 							start = start_timestamp + window_idx * WINDOW_SIZE_TS
 							end = start + WINDOW_SIZE_TS if start + WINDOW_SIZE_TS < end_timestamp else end_timestamp
 							sensor_df_window = sensor_df[start:end].values
+							
+							#normalize
+							sensor_df_window, min_, max_ = normalize3(sensor_df_window)
 
 							# Zero-pad or truncate the window to match the expected
 							# length
@@ -392,16 +396,11 @@ def load_data(dataset):
 			'domain_shift_env'
 			]  
 
-
-
 		X, y = load_windows_dataset_IMADS(
-			path ='processed/{}/train_dataset_window_0.100s.h5'.format(
-				dataset
-			),
+			path = os.path.join(output_folder, dataset, 'train_dataset_window_0.100s.h5'),
 			label_names = label_names,
 			sensors= sensor_dict
-			)
-		
+			)		
 		
 		# Combine anomaly labels and domain shift labels to form a combined label
 		y['combined_label'] = y['anomaly_label'] + \
@@ -420,13 +419,9 @@ def load_data(dataset):
 		# Select the training and validation data based on the indices
 		X_train = [sensor_data[train_indices] for sensor_data in X]
 		X_valid = [sensor_data[valid_indices] for sensor_data in X]
-		# y_train = y.iloc[train_indices]['anomaly_label'].reset_index(drop=True)
-		# y_valid = y.iloc[valid_indices]['anomaly_label'].reset_index(drop=True)
 
 		X_test, y_test = load_windows_dataset_IMADS(
-			path ='processed/{}/test_dataset_window_0.100s.h5'.format(
-				dataset
-			),
+			path = os.path.join(output_folder, dataset, 'test_dataset_window_0.100s.h5'),
 			label_names = label_names,
 			sensors= sensor_dict
 			)
@@ -468,17 +463,20 @@ def load_data(dataset):
 		X_valid = np.concatenate(X_valid_res_c, axis = 1)
 		X_test = np.concatenate(X_test_res_c, axis = 1)
 
-		dataset_folder = os.path.join('processed', dataset)
-		np.save(os.path.join(dataset_folder, 'train.npy'), X_train)
-		np.save(os.path.join(dataset_folder, 'valid.npy'), X_valid)
-		np.save(os.path.join(dataset_folder, 'test.npy'),  X_test)
+		np.save(os.path.join(output_folder, 'train.npy'), X_train)
+		np.save(os.path.join(output_folder, 'valid.npy'), X_valid)
+		np.save(os.path.join(output_folder, 'test.npy'),  X_test)
 		
 		# adapt labels (see SMAP processing)
 		y_test = y_test.repeat(X_test_res[0].shape[-1]) #obtain a label for each timestamp
 		y_test = y_test.reshape(-1,1).repeat(X_test.shape[-1], axis=1) # obtain as many label columns as the channels
-		# np.save(os.path.join(dataset_folder, 'labels_train.npy'), y_train)
-		# np.save(os.path.join(dataset_folder, 'labels_valid.npy'), y_valid)
-		np.save(os.path.join(dataset_folder, 'labels.npy'), y_test)
+		np.save(os.path.join(output_folder, 'labels.npy'), y_test)
+
+		# with h5py.File(os.path.join(output_folder, 'dataset.h5'), 'w') as h5file:
+		# 	h5file.create_dataset('train',  data=X_train, chunks=True)
+		# 	h5file.create_dataset('valid',  data=X_valid, chunks=True)
+		# 	h5file.create_dataset('test',   data=X_test,  chunks=True)
+		# 	h5file.create_dataset('labels', data=y_test,  chunks=True)
 		
 	elif dataset == 'SMD':
 		dataset_folder = 'data/SMD'
