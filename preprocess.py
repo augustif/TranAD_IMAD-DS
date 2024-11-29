@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 from src.folderconstants import *
 from shutil import copyfile
 from time import gmtime, strftime
+from tqdm import tqdm
 
 SEED = 6666
 
@@ -73,6 +74,13 @@ def preprocess_IMAD_DS(machine, sensor_dict):
 	for sensor in sensor_dict.keys():
 		Train_Metadata[sensor] = INPUT_FOLDER + '/train/' + Train_Metadata[sensor]
 		Test_Metadata[sensor] = INPUT_FOLDER + '/test/' + Test_Metadata[sensor]
+
+	# filter a few data
+	Train_Metadata['combined_label'] = Train_Metadata['anomaly_label'] + Train_Metadata['domain_shift_op'] + Train_Metadata['domain_shift_env']
+	Test_Metadata['combined_label'] = Test_Metadata['anomaly_label'] + Test_Metadata['domain_shift_op'] + Test_Metadata['domain_shift_env']
+
+	Train_Metadata = Train_Metadata.groupby('combined_label').apply(lambda x: x.sample(min(len(x), 1))).reset_index(drop=True)
+	Test_Metadata = Test_Metadata.groupby('combined_label').apply(lambda x: x.sample(min(len(x), 1))).reset_index(drop=True)
 
 	# Loop through each dataset split type ('train' and 'test') with
 	# corresponding metadata
@@ -368,6 +376,30 @@ def load_data(dataset):
 			
 	elif dataset=='IMAD-DS_RoboticArm' or dataset=='IMAD-DS_BrushlessMotor':
 		
+		# Reshape and zero-pad each single segment
+		def upsample_array(array, target_length):
+			original_length = array.shape[-1]
+			x_original = np.linspace(0, 1, original_length)
+			x_target = np.linspace(0, 1, target_length)
+			upsampled_array = np.zeros((array.shape[0], array.shape[1], target_length))
+			
+			for i in tqdm(range(array.shape[0])):
+				for j in range(array.shape[1]):
+					f = interp1d(x_original, array[i, j, :], kind='linear')
+					upsampled_array[i, j, :] = f(x_target)
+			
+			return upsampled_array
+		
+		def upsample_dataset(dataset):
+
+			target_length = max(array.shape[-1] for array in dataset)
+			i=0
+			for i in range(len(dataset)):
+				print(f'Upsampling array {i}')
+				dataset[i] = upsample_array(dataset[i], target_length)
+				i+=1
+			return dataset
+		
 		# Initialize utility dictionary for preprocessing operations
 		sensor_dict = {
 			'imp23absu_mic': {
@@ -396,87 +428,83 @@ def load_data(dataset):
 			'domain_shift_env'
 			]  
 
-		X, y = load_windows_dataset_IMADS(
+		# Start train-----------------------------------------------------------------------------------------------------------
+
+		X_train, y_train = load_windows_dataset_IMADS(
 			path = os.path.join(output_folder, dataset, 'train_dataset_window_0.100s.h5'),
 			label_names = label_names,
 			sensors= sensor_dict
 			)		
-		
-		# Combine anomaly labels and domain shift labels to form a combined label
-		y['combined_label'] = y['anomaly_label'] + \
-			y['domain_shift_op'] + y['domain_shift_env']
+
+		# probably to remove -----------------------------------------------------------------------------------------------------------
+
+		# # Combine anomaly labels and domain shift labels to form a combined label
+		# y_train['combined_label'] = y_train['anomaly_label'] + \
+		# 	y_train['domain_shift_op'] + y_train['domain_shift_env']
 
 		# Split training data into training and validation sets, maintaining the
 		# stratified distribution of the combined label
-		train_indices, valid_indices, _, _ = train_test_split(
-			range(len(y)),
-			y,
-			stratify=y['combined_label'],
-			test_size=0.2,
-			random_state=SEED
-		)
+		# train_indices, valid_indices, _, _ = train_test_split(
+		# 	range(len(y_train)),
+		# 	y_train,
+		# 	stratify=y_train['combined_label'],
+		# 	test_size=0.2,
+		# 	random_state=SEED
+		# )
 
 		# Select the training and validation data based on the indices
-		X_train = [sensor_data[train_indices] for sensor_data in X]
-		X_valid = [sensor_data[valid_indices] for sensor_data in X]
+		# X_train = [sensor_data[train_indices] for sensor_data in X_train]
+		# X_valid = [sensor_data[valid_indices] for sensor_data in X_train]
+
+		# -----------------------------------------------------------------------------------------------------------
+
+		print('Upsampling X_train')
+		upsample_dataset(X_train)
+		# X_valid_res = upsample_dataset(X_valid)
+
+		# concatenate all windows into a single vector
+		X_train = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_train]
+		# X_valid_res_c = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_valid_res]
+
+		# merge into a single array with a channel per sensor 
+		X_train = np.concatenate(X_train, axis = 1)
+		# X_valid = np.concatenate(X_valid_res_c, axis = 1)
+
+		np.save(os.path.join(output_folder, dataset, 'train.npy'), X_train)
+		# np.save(os.path.join(output_folder, 'valid.npy'), X_valid)
+		del X_train, y_train
+		# END TRAIN -----------------------------------------------------------------------------------------------------------
 
 		X_test, y_test = load_windows_dataset_IMADS(
 			path = os.path.join(output_folder, dataset, 'test_dataset_window_0.100s.h5'),
 			label_names = label_names,
 			sensors= sensor_dict
 			)
-		
-		# Combine anomaly labels and domain shift labels to form a combined label
-		y_test = y_test['anomaly_label'].apply(lambda x: 1 if x != 'normal' else 0).values
 
-		# Reshape and zero-pad each single segment
-		def upsample_array(array, target_length):
-			original_length = array.shape[-1]
-			x_original = np.linspace(0, 1, original_length)
-			x_target = np.linspace(0, 1, target_length)
-			upsampled_array = np.zeros((array.shape[0], array.shape[1], target_length))
-			
-			for i in range(array.shape[0]):
-				for j in range(array.shape[1]):
-					f = interp1d(x_original, array[i, j, :], kind='linear')
-					upsampled_array[i, j, :] = f(x_target)
-			
-			return upsampled_array
+		y_test = y_test['anomaly_label'].apply(lambda x: 1 if x != 'normal' else 0).values		
 		
-		def upsample_dataset(dataset):
-
-			target_length = max(array.shape[-1] for array in dataset)
-			dataset_res = [upsample_array(array, target_length) for array in dataset]
-			return dataset_res
-	
-		X_train_res = upsample_dataset(X_train)
-		X_valid_res = upsample_dataset(X_valid)
-		X_test_res = upsample_dataset(X_test)
+		print('Upsampling X_test')
+		upsample_dataset(X_test)
 
 		# concatenate all windows into a single vector
-		X_train_res_c = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_train_res]
-		X_valid_res_c = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_valid_res]
-		X_test_res_c  = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_test_res]
-
-		# merge into a single array with a channel per sensor 
-		X_train = np.concatenate(X_train_res_c, axis = 1)
-		X_valid = np.concatenate(X_valid_res_c, axis = 1)
-		X_test = np.concatenate(X_test_res_c, axis = 1)
-
-		np.save(os.path.join(output_folder, 'train.npy'), X_train)
-		np.save(os.path.join(output_folder, 'valid.npy'), X_valid)
-		np.save(os.path.join(output_folder, 'test.npy'),  X_test)
+		X_test  = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_test]
 		
-		# adapt labels (see SMAP processing)
-		y_test = y_test.repeat(X_test_res[0].shape[-1]) #obtain a label for each timestamp
-		y_test = y_test.reshape(-1,1).repeat(X_test.shape[-1], axis=1) # obtain as many label columns as the channels
-		np.save(os.path.join(output_folder, 'labels.npy'), y_test)
+		# merge into a single array with a channel per sensor 
+		X_test = np.concatenate(X_test, axis = 1)
 
-		# with h5py.File(os.path.join(output_folder, 'dataset.h5'), 'w') as h5file:
-		# 	h5file.create_dataset('train',  data=X_train, chunks=True)
-		# 	h5file.create_dataset('valid',  data=X_valid, chunks=True)
-		# 	h5file.create_dataset('test',   data=X_test,  chunks=True)
-		# 	h5file.create_dataset('labels', data=y_test,  chunks=True)
+		np.save(os.path.join(output_folder, dataset, 'test.npy'),  X_test)
+
+		# adapt labels (see SMAP processing)
+		y_test = y_test.repeat(X_test[0].shape[-1]) #obtain a label for each timestamp
+		y_test = y_test.reshape(-1,1).repeat(X_test.shape[-1], axis=1) # obtain as many label columns as the channels
+		np.save(os.path.join(output_folder, dataset, 'labels.npy'), y_test)
+
+		with h5py.File(os.path.join(output_folder, dataset, 'dataset.h5'), 'w') as h5file:
+			X_train = np.load(os.path.join(output_folder, dataset, 'train.npy'))
+			h5file.create_dataset('train',  data=X_train, chunks=True)
+			# h5file.create_dataset('valid',  data=X_valid, chunks=True)
+			h5file.create_dataset('test',   data=X_test,  chunks=True)
+			h5file.create_dataset('labels', data=y_test,  chunks=True)
 		
 	elif dataset == 'SMD':
 		dataset_folder = 'data/SMD'
