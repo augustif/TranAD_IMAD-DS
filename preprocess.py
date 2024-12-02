@@ -481,12 +481,14 @@ def load_data(dataset):
 			sensors= sensor_dict
 			)
 
+		y_test = pd.DataFrame(y_test['anomaly_label'])
 		y_test = y_test['anomaly_label'].apply(lambda x: 1 if x != 'normal' else 0).values		
 		
 		print('Upsampling X_test')
 		upsample_dataset(X_test)
 
 		# concatenate all windows into a single vector
+		win_len_samples = X_test[0].shape[-1]
 		X_test  = [array.reshape((array.shape[0]*array.shape[-1], array.shape[1])) for array in X_test]
 		
 		# merge into a single array with a channel per sensor 
@@ -495,7 +497,7 @@ def load_data(dataset):
 		np.save(os.path.join(output_folder, dataset, 'test.npy'),  X_test)
 
 		# adapt labels (see SMAP processing)
-		y_test = y_test.repeat(X_test[0].shape[-1]) #obtain a label for each timestamp
+		y_test = y_test.repeat(win_len_samples) #obtain a label for each timestamp
 		y_test = y_test.reshape(-1,1).repeat(X_test.shape[-1], axis=1) # obtain as many label columns as the channels
 		np.save(os.path.join(output_folder, dataset, 'labels.npy'), y_test)
 
