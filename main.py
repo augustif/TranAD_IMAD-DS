@@ -3,7 +3,7 @@ import pickle
 import os
 import pandas as pd
 from tqdm import tqdm
-from src.datasets import LazyHDF5Dataset, LazyHDF5Dataset_windowed
+from src.datasets import LazyHDF5DatasetChunks, LazyHDF5DatasetWindows
 from src.models import *
 from src.constants import *
 from src.plotting import *
@@ -42,8 +42,8 @@ def load_dataset(dataset):
             h5_path = os.path.join(dataset_folder, 'dataset.h5')
             # WINDOW_SIZE = 1600 # 1600=100 ms -> this way different segments windows are processed separately (inpuit is composed of stakced windows of 100 ms)
             # BATCH_SIZE = 1024
-            train_dataset = LazyHDF5Dataset(h5_path, dataset_name='train', n_win_per_chunk=N_WIN_PER_CHUNK)
-            test_dataset = LazyHDF5Dataset(h5_path, dataset_name='test', n_win_per_chunk=N_WIN_PER_CHUNK)
+            train_dataset = LazyHDF5DatasetChunks(h5_path, dataset_name='train', n_win_per_chunk=N_WIN_PER_CHUNK)
+            test_dataset = LazyHDF5DatasetChunks(h5_path, dataset_name='test', n_win_per_chunk=N_WIN_PER_CHUNK)
             train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE)
             test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
             loader.append(train_loader)
@@ -92,9 +92,11 @@ def load_model(modelname, dims):
         epoch = -1; accuracy_list = []
     return model, optimizer, scheduler, epoch, accuracy_list
 
-def backprop(epoch, model, data, dataO, optimizer, scheduler, training = True):
+def backprop(epoch, model, dataloader, optimizer, scheduler, training = True):
     l = nn.MSELoss(reduction = 'mean' if training else 'none')
-    feats = dataO.shape[1]
+    data, _ = next(iter(dataloader)) 
+    dataO = data
+    feats = dataO.shape[1] if 'IMAD-DS' not in args.dataset else dataO.shape[-1]
     if 'DAGMM' in model.name:
         l = nn.MSELoss(reduction = 'none')
         compute = ComputeLoss(model, 0.1, 0.005, 'cpu', model.n_gmm)
@@ -271,7 +273,6 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training = True):
         l = nn.MSELoss(reduction = 'none')
         data_x = torch.DoubleTensor(data); dataset = TensorDataset(data_x, data_x)
         bs = model.batch if training else len(data)
-        dataloader = DataLoader(dataset, batch_size = bs)
         n = epoch + 1; w_size = model.n_window
         l1s, l2s = [], []
         if training:
@@ -312,8 +313,8 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training = True):
             return loss.detach().numpy(), y_pred.detach().numpy()
 
 if __name__ == '__main__':
-    N_WIN_PER_CHUNK = 256 #number of windows to read simultaneously from memory
-    BATCH_SIZE = 1 #batch size
+    N_WIN_PER_CHUNK = 2 #number of windows to read simultaneously from memory
+    BATCH_SIZE = 128 #batch size
 
     train_loader, test_loader, labels = load_dataset(args.dataset)
     if args.model in ['MERLIN']:
@@ -419,30 +420,33 @@ if __name__ == '__main__':
             # WINDOW_SIZE = 1600 # 1600=100 ms -> this way different segments windows are processed separately (inpuit is composed of stakced windows of 100 ms)
             # BATCH_SIZE = 1024
 
-            train_dataset = LazyHDF5Dataset_windowed(h5file_path, dataset_name='train', n_win_per_chunk=N_WIN_PER_CHUNK)
-            test_dataset = LazyHDF5Dataset_windowed(h5file_path, dataset_name='test', n_win_per_chunk=N_WIN_PER_CHUNK)
+            # train_dataset = LazyHDF5DatasetWindows(h5file_path, dataset_name='train', n_win_per_chunk=N_WIN_PER_CHUNK)
+            # test_dataset = LazyHDF5DatasetWindows(h5file_path, dataset_name='test', n_win_per_chunk=N_WIN_PER_CHUNK)
             
-            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE)
-            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
-            # trainD, testD = train_dataset.get_chunk()
-            # trainO, testO = trainD, testD
+            # train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+            # test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     ### Training phase
     if not args.test:
         print(f'{color.HEADER}Training {args.model} on {args.dataset}{color.ENDC}')
         num_epochs = 5; e = epoch + 1; start = time()
         for e in tqdm(list(range(epoch+1, epoch+num_epochs+1))):
-            lossT, lr = backprop(e, model, trainD, trainO, optimizer, scheduler)
+            train_dataset = LazyHDF5DatasetWindows(h5file_path, dataset_name='train', n_win_per_chunk=N_WIN_PER_CHUNK)
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+            lossT, lr = backprop(e, model, train_loader, optimizer, scheduler)
             accuracy_list.append((lossT, lr))
         print(color.BOLD+'Training time: '+"{:10.4f}".format(time()-start)+' s'+color.ENDC)
         save_model(model, optimizer, scheduler, e, accuracy_list)
         plot_accuracies(accuracy_list, f'{args.model}_{args.dataset}')
 
     ### Testing phase
+    test_dataset = LazyHDF5DatasetWindows(h5file_path, dataset_name='test', n_win_per_chunk=N_WIN_PER_CHUNK)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
     torch.zero_grad = True
     model.eval()
     print(f'{color.HEADER}Testing {args.model} on {args.dataset}{color.ENDC}')
-    loss, y_pred = backprop(0, model, testD, testO, optimizer, scheduler, training=False)
+    loss, y_pred = backprop(0, model, test_loader, optimizer, scheduler, training=False)
 
     ### Plot curves
     if not args.test:
