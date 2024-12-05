@@ -470,8 +470,10 @@ def load_data(dataset):
 		X_train = np.concatenate(X_train, axis = 1)
 		# X_valid = np.concatenate(X_valid_res_c, axis = 1)
 
-		np.save(os.path.join(output_folder, dataset, 'train.npy'), X_train)
+		# np.save(os.path.join(output_folder, dataset, 'train.npy'), X_train)
 		# np.save(os.path.join(output_folder, 'valid.npy'), X_valid)
+		with h5py.File(os.path.join(output_folder, dataset, 'dataset.h5'), 'w') as h5file:
+			h5file.create_dataset('train',  data=X_train, chunks=True)
 		del X_train, y_train
 		# END TRAIN -----------------------------------------------------------------------------------------------------------
 
@@ -482,7 +484,7 @@ def load_data(dataset):
 			)
 
 		y_test = pd.DataFrame(y_test['anomaly_label'])
-		y_test = y_test['anomaly_label'].apply(lambda x: 1 if x != 'normal' else 0).values		
+		y_test = y_test['anomaly_label'].apply(lambda x: 1 if x != 'normal' else 0).values
 		
 		print('Upsampling X_test')
 		upsample_dataset(X_test)
@@ -494,16 +496,14 @@ def load_data(dataset):
 		# merge into a single array with a channel per sensor 
 		X_test = np.concatenate(X_test, axis = 1)
 
-		np.save(os.path.join(output_folder, dataset, 'test.npy'),  X_test)
+		# np.save(os.path.join(output_folder, dataset, 'test.npy'),  X_test)
 
 		# adapt labels (see SMAP processing)
 		y_test = y_test.repeat(win_len_samples) #obtain a label for each timestamp
 		y_test = y_test.reshape(-1,1).repeat(X_test.shape[-1], axis=1) # obtain as many label columns as the channels
-		np.save(os.path.join(output_folder, dataset, 'labels.npy'), y_test)
+		# np.save(os.path.join(output_folder, dataset, 'labels.npy'), y_test)
 
-		with h5py.File(os.path.join(output_folder, dataset, 'dataset.h5'), 'w') as h5file:
-			X_train = np.load(os.path.join(output_folder, dataset, 'train.npy'))
-			h5file.create_dataset('train',  data=X_train, chunks=True)
+		with h5py.File(os.path.join(output_folder, dataset, 'dataset.h5'), 'a') as h5file:
 			# h5file.create_dataset('valid',  data=X_valid, chunks=True)
 			h5file.create_dataset('test',   data=X_test,  chunks=True)
 			h5file.create_dataset('labels', data=y_test,  chunks=True)
